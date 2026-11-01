@@ -36,4 +36,7 @@ RUN mkdir -p /var/lib/yt2abs/logs /audiobooks
 VOLUME ["/audiobooks", "/var/lib/yt2abs"]
 EXPOSE 8087
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -fsS "http://127.0.0.1:${YT2ABS_WEB_PORT:-8087}/healthz" || exit 1
+
 ENTRYPOINT ["/app/entrypoint.sh"]
