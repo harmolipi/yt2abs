@@ -1,0 +1,29 @@
+services:
+  yt2abs:
+    image: ghcr.io/harmolipi/yt2abs:latest
+    # To build locally instead of pulling:
+    # build: .
+    container_name: yt2abs
+    ports:
+      - "8087:8087"
+    environment:
+      TZ: ${TZ:-America/New_York}
+      YT2ABS_WEB_TOKEN: ${YT2ABS_WEB_TOKEN:?set YT2ABS_WEB_TOKEN in .env}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+
+      # Where finished audiobook folders are written (mount below).
+      YT2ABS_OUTPUT_DIR: /audiobooks
+
+      # Optional: ask Audiobookshelf to scan after each book. The token/user
+      # must be admin or root — a library-scoped user gets HTTP 403.
+      # ABS_URL: http://audiobookshelf:80
+      # ABS_TOKEN: ${ABS_TOKEN:-}
+      # ABS_LIBRARY_ID: ${ABS_LIBRARY_ID:-}
+    volumes:
+      - ${AUDIOBOOKS_DIR:-./audiobooks}:/audiobooks
+      - yt2abs-data:/var/lib/yt2abs
+    restart: unless-stopped
+
+volumes:
+  yt2abs-data:
