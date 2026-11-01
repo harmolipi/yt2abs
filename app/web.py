@@ -597,7 +597,7 @@ class Handler(BaseHTTPRequestHandler):
         # ?t=<token> is an exchange, not a session: swap it for a cookie and
         # redirect, so the token never stays in the URL or the browser history.
         supplied = (query.get("t") or [""])[0]
-        if supplied:
+        if supplied and TOKEN:
             if token_ok(supplied):
                 return self.send(303, "", headers={
                     "Location": path if path != "/" else "/",
