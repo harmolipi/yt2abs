@@ -81,7 +81,7 @@ WORK_DIR=
 PLAYLIST_TITLE=
 YTDLP_AUTH=()
 
-usage() { sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; }
 
 log() {
   [[ -n "$LOG_FILE" ]] || return 0
