@@ -161,8 +161,11 @@ Three things need to line up:
      - /srv/media/audiobooks:/audiobooks
    ```
 
-2. **Make ABS notice new books.** Either enable **Watch Library Folders** in
-   the library settings, or (more reliable) let yt2abs trigger a scan. Set:
+2. **Make ABS notice new books.** Let yt2abs trigger a scan (recommended) and
+   keep **Watch Library Folders OFF**. Running both races ABS against itself:
+   the watcher can add the item mid-scan and the scan then adds a second copy.
+   That produced a duplicate library entry for one file in testing
+   (2026-11-05). Set:
 
    ```yaml
    ABS_URL: http://audiobookshelf:80
@@ -170,8 +173,10 @@ Three things need to line up:
    # ABS_LIBRARY_ID: optional, pins the library
    ```
 
-   The folder watcher alone is not dependable for newly created top-level
-   folders, so the scan trigger is what makes a book appear immediately.
+   Add a **scheduled scan** as a safety net for files added outside yt2abs
+   (library settings → Scan Library, e.g. `0 2 * * *`). The watcher alone is
+   not dependable for newly created top-level folders; the scan trigger is
+   what makes a book appear immediately.
 
 3. **Use an admin/root API token.** The scan endpoint rejects normal
    library-scoped users with HTTP 403. yt2abs logs `ABS rejected the scan (HTTP
