@@ -772,6 +772,9 @@ def main():
     httpd.daemon_threads = True
     mode = "anonymous" if ALLOW_ANON else ("username/password" if FORM_AUTH else "token")
     print(f"yt2abs-web listening on http://{HOST}:{PORT} (auth: {mode})", flush=True)
+    if FORM_AUTH and WEB_PASS.lower() in ("change-me", "changeme", "password", "admin"):
+        print("WARNING: YT2ABS_WEB_PASSWORD is a placeholder — change it before "
+              "exposing this service", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
