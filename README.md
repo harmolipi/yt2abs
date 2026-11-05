@@ -24,13 +24,13 @@ mkdir -p yt2abs && cd yt2abs
 curl -fsSLO https://raw.githubusercontent.com/harmolipi/yt2abs/main/docker-compose.yml
 curl -fsSLO https://raw.githubusercontent.com/harmolipi/yt2abs/main/.env.example
 cp .env.example .env
-# edit .env: set YT2ABS_WEB_TOKEN and AUDIOBOOKS_DIR
+# edit .env: set YT2ABS_WEB_PASSWORD and AUDIOBOOKS_DIR
 docker compose up -d
 ```
 
-Open `http://<host>:8087`, paste the token from `.env`, and submit a link.
-The token is exchanged for an HttpOnly session cookie, so you only enter it
-once per browser.
+Open `http://<host>:8087` and sign in with `admin` (or whatever username you
+set) and your password. The session is an HttpOnly cookie, so you stay signed
+in per browser.
 
 The container writes finished books straight into the mounted library folder.
 If Audiobookshelf watches that folder, the book appears on its own; otherwise
@@ -44,7 +44,8 @@ services:
     image: ghcr.io/harmolipi/yt2abs:latest
     ports: ["8087:8087"]
     environment:
-      YT2ABS_WEB_TOKEN: ${YT2ABS_WEB_TOKEN}
+      YT2ABS_WEB_USERNAME: ${YT2ABS_WEB_USERNAME:-admin}
+      YT2ABS_WEB_PASSWORD: ${YT2ABS_WEB_PASSWORD}
       YT2ABS_OUTPUT_DIR: /audiobooks
       PUID: 1000
       PGID: 1000
@@ -66,7 +67,9 @@ shared network (or use the host's IP and published port for `ABS_URL`).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `YT2ABS_WEB_TOKEN` | — | Required access token. `openssl rand -hex 24` |
+| `YT2ABS_WEB_USERNAME` | `admin` in compose | Login username |
+| `YT2ABS_WEB_PASSWORD` | — | Login password. Generate: `openssl rand -base64 24` |
+| `YT2ABS_WEB_TOKEN` | — | API bearer token; also enables token-only login when no password is set |
 | `YT2ABS_ALLOW_UNAUTHENTICATED` | `0` | `1` disables auth — only behind a proxy that authenticates |
 | `YT2ABS_COOKIE_SECURE` | `0` | `1` adds `Secure` to the session cookie (HTTPS deployments) |
 | `YT2ABS_SESSION_TTL` | `2592000` | Session lifetime in seconds |
@@ -85,6 +88,39 @@ shared network (or use the host's IP and published port for `ABS_URL`).
 | `TZ` | container default | Timestamps in logs |
 
 State lives in `/var/lib/yt2abs` (queue database and per-job logs).
+
+## Authentication
+
+Like Sonarr and Radarr, the web UI uses a **username and password** login with
+a session cookie. Set `YT2ABS_WEB_USERNAME` and `YT2ABS_WEB_PASSWORD` in
+compose. Sessions are random ids, `HttpOnly` and `SameSite=Lax`; they live in
+memory, so restarting the container signs everyone out. Failed logins are rate
+limited to 8 per IP per 5 minutes.
+
+For automation, set `YT2ABS_WEB_TOKEN` and send it as a bearer token:
+
+```bash
+curl -H "Authorization: Bearer $YT2ABS_WEB_TOKEN" http://host:8087/api/jobs
+```
+
+If you set only a token (no username/password), the login form accepts the token
+itself. `?t=<token>` also exchanges a token for a session and redirects, which
+is handy for bookmarks.
+
+### Exposing it to the internet
+
+Put it behind a reverse proxy that terminates TLS (Nginx Proxy Manager, Caddy,
+Traefik), then:
+
+- set `YT2ABS_COOKIE_SECURE=1` so the session cookie is only sent over HTTPS;
+- bind the port to localhost (`127.0.0.1:8087:8087`) when the proxy runs on the
+  same host, or otherwise keep 8087 off the public interface;
+- use a strong, unique password;
+- only set `YT2ABS_ALLOW_UNAUTHENTICATED=1` if the proxy already authenticates
+  every request (Authelia, Cloudflare Access, basic auth at the proxy).
+
+There is no TLS in the container itself — do not publish port 8087 directly to
+the internet.
 
 ## Playlists
 

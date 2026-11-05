@@ -8,22 +8,29 @@ Everything is Python 3 standard library — no venv, no pip.
 
 Auth
 ----
-Every route except /healthz requires YT2ABS_WEB_TOKEN unless
-YT2ABS_ALLOW_UNAUTHENTICATED=1 (use that only behind a proxy that already
-authenticates, e.g. Authelia or Cloudflare Access).
+Two modes, matching what Sonarr/Radarr users expect:
 
-Three ways to authenticate:
-  * ?t=<token> on a GET — exchanges the token for a session cookie and
-    redirects to /, so the token does not stay in the address bar.
-  * the yt2abs_session cookie (random id, HttpOnly, SameSite=Lax).
-  * Authorization: Bearer <token> for curl / scripts.
+  * Username + password (recommended): set YT2ABS_WEB_USERNAME and
+    YT2ABS_WEB_PASSWORD. The page shows a normal login form; the session is a
+    random HttpOnly cookie. YT2ABS_WEB_TOKEN still works for API/automation.
+  * Token only (legacy): set just YT2ABS_WEB_TOKEN. The login form accepts the
+    token itself, and ?t=<token> on a GET exchanges it for a session cookie and
+    redirects, so the token does not stay in the address bar.
+
+Either mode can be disabled with YT2ABS_ALLOW_UNAUTHENTICATED=1 (only behind a
+proxy that already authenticates, e.g. Authelia or Cloudflare Access).
+
+  * Authorization: Bearer <token> always works for curl / scripts.
+  * the yt2abs_session cookie is a random id (HttpOnly, SameSite=Lax).
 
 Sessions live in memory and expire after YT2ABS_SESSION_TTL seconds (default
 30 days); restarting the service logs everyone out. Failed logins are rate
 limited to 8 per IP per 5 minutes.
 
 Environment:
-  YT2ABS_WEB_TOKEN             required unless anonymous mode is on
+  YT2ABS_WEB_USERNAME          login username (optional)
+  YT2ABS_WEB_PASSWORD          login password (optional; needs a username)
+  YT2ABS_WEB_TOKEN             API bearer token / token-only login
   YT2ABS_ALLOW_UNAUTHENTICATED 1 = no auth (default 0)
   YT2ABS_COOKIE_SECURE         1 = add Secure to the session cookie (default 0)
   YT2ABS_SESSION_TTL           session lifetime seconds (default 2592000)
@@ -50,6 +57,9 @@ from queue import Queue
 from urllib.parse import parse_qs, urlparse
 
 TOKEN = os.environ.get("YT2ABS_WEB_TOKEN", "").strip()
+WEB_USER = os.environ.get("YT2ABS_WEB_USERNAME", "").strip()
+WEB_PASS = os.environ.get("YT2ABS_WEB_PASSWORD", "")
+FORM_AUTH = bool(WEB_USER and WEB_PASS)
 ALLOW_ANON = os.environ.get("YT2ABS_ALLOW_UNAUTHENTICATED", "0") == "1"
 COOKIE_SECURE = os.environ.get("YT2ABS_COOKIE_SECURE", "0") == "1"
 SESSION_TTL = int(os.environ.get("YT2ABS_SESSION_TTL", str(30 * 86400)))
@@ -84,6 +94,18 @@ def token_ok(supplied):
         return secrets.compare_digest(supplied.encode("utf-8"), TOKEN.encode("utf-8"))
     except (UnicodeError, TypeError):
         return False
+
+
+def credentials_ok(username, password):
+    """Username+password when configured; otherwise the password is the token."""
+    if FORM_AUTH:
+        u = username.encode("utf-8", "replace")
+        p = password.encode("utf-8", "replace")
+        return (secrets.compare_digest(u, WEB_USER.encode())
+                and secrets.compare_digest(p, WEB_PASS.encode()))
+    if TOKEN:
+        return token_ok(password)
+    return False
 
 
 def new_session():
@@ -316,10 +338,11 @@ LOGIN_PAGE = """<!doctype html>
 </style></head><body>
 <form method="post" action="/login">
   <h1>YouTube → Audiobookshelf</h1>
-  <p>Enter the access token from the service configuration.</p>
-  <input name="token" type="password" autocomplete="current-password"
-         placeholder="access token" autofocus required>
-  <button>Unlock</button>{error}
+  <p>{hint}</p>
+  {user_field}
+  <input name="password" type="password" autocomplete="current-password"
+         placeholder="{pw_placeholder}"{pw_autofocus} required>
+  <button>Sign in</button>{error}
 </form></body></html>"""
 
 PAGE = """<!doctype html>
@@ -343,6 +366,11 @@ PAGE = """<!doctype html>
          font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
   main { width:min(100% - 32px, 720px); margin:0 auto; padding:32px 0 64px; }
   h1 { font-size:clamp(22px,5vw,30px); letter-spacing:-.02em; margin:0 0 4px; }
+  .topbar { display:flex; align-items:baseline; justify-content:space-between;
+            gap:16px; }
+  .logout { color:var(--muted); font-size:14px; text-decoration:none;
+            white-space:nowrap; }
+  .logout:hover { color:var(--text); text-decoration:underline; }
   .sub { color:var(--muted); margin:0 0 28px; font-size:15px; }
   form, .panel { background:var(--card); border:1px solid var(--line);
                  border-radius:18px; padding:20px; }
@@ -380,7 +408,10 @@ PAGE = """<!doctype html>
   .empty { color:var(--muted); font-size:14px; }
 </style></head><body>
 <main>
-  <h1>YouTube → Audiobookshelf</h1>
+  <div class="topbar">
+    <h1>YouTube → Audiobookshelf</h1>
+    <!--LOGOUT-->
+  </div>
   <p class="sub">Paste a link. It comes out as a chaptered audiobook in your library.</p>
 
   <form id="add">
@@ -579,8 +610,21 @@ class Handler(BaseHTTPRequestHandler):
         return {"Set-Cookie": "; ".join(parts)}
 
     def login_page(self, error=""):
-        return self.send(200, LOGIN_PAGE.format(error=error),
-                         "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+        if FORM_AUTH:
+            user_field = ('<input name="username" type="text" autocomplete="username" '
+                          'placeholder="username" autofocus required>')
+            hint = "Sign in to the audiobook queue."
+            pw_placeholder = "password"
+            pw_autofocus = ""
+        else:
+            user_field = ""
+            hint = "Enter the access token from the service configuration."
+            pw_placeholder = "access token"
+            pw_autofocus = " autofocus"
+        return self.send(200, LOGIN_PAGE.format(
+            error=error, hint=hint, user_field=user_field,
+            pw_placeholder=pw_placeholder, pw_autofocus=pw_autofocus),
+            "text/html; charset=utf-8", {"Cache-Control": "no-store"})
 
     # ── GET ──
     def do_GET(self):
@@ -591,8 +635,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/healthz":
             return self.send(200, "ok")
 
-        if not TOKEN and not ALLOW_ANON:
-            return self.send(500, "YT2ABS_WEB_TOKEN is not configured")
+        if not TOKEN and not FORM_AUTH and not ALLOW_ANON:
+            return self.send(500, "No credentials configured")
 
         # ?t=<token> is an exchange, not a session: swap it for a cookie and
         # redirect, so the token never stays in the URL or the browser history.
@@ -603,7 +647,7 @@ class Handler(BaseHTTPRequestHandler):
                     "Location": path if path != "/" else "/",
                     **self.session_cookie(new_session()),
                 })
-            return self.login_page("<p class='err'>Wrong token.</p>")
+            return self.login_page("<p class='err'>Incorrect credentials.</p>")
 
         # Logout must work even with a dead/absent session.
         if path == "/logout":
@@ -624,7 +668,10 @@ class Handler(BaseHTTPRequestHandler):
                            "default-src 'none'; style-src 'unsafe-inline'; "
                            "script-src 'unsafe-inline'; connect-src 'self'; "
                            "img-src 'self' data:; form-action 'self'; base-uri 'none'"}
-            return self.send(200, PAGE, "text/html; charset=utf-8", headers)
+            logout = ('<a class="logout" href="/logout">Log out</a>'
+                      if (FORM_AUTH or TOKEN) and not ALLOW_ANON else "")
+            return self.send(200, PAGE.replace("<!--LOGOUT-->", logout),
+                             "text/html; charset=utf-8", headers)
 
         if path == "/api/jobs":
             return self.json(200, {"jobs": list_jobs()})
@@ -666,13 +713,14 @@ class Handler(BaseHTTPRequestHandler):
             if login_blocked(ip):
                 return self.send(429, "Too many failed attempts. Try again later.")
             form = parse_qs(raw.decode("utf-8", "replace"))
-            supplied = (form.get("token") or [""])[0]
-            if token_ok(supplied):
+            username = (form.get("username") or [""])[0]
+            supplied = (form.get("password") or form.get("token") or [""])[0]
+            if credentials_ok(username, supplied):
                 clear_login_failures(ip)
                 return self.send(303, "", headers={
                     "Location": "/", **self.session_cookie(new_session())})
             note_login_failure(ip)
-            return self.login_page("<p class='err'>Wrong token.</p>")
+            return self.login_page("<p class='err'>Incorrect credentials.</p>")
 
         if not self.authed():
             return self.json(401, {"error": "unauthorized"})
@@ -713,15 +761,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    if not TOKEN and not ALLOW_ANON:
-        sys.exit("YT2ABS_WEB_TOKEN is not set — refusing to start "
-                 "(set YT2ABS_ALLOW_UNAUTHENTICATED=1 only behind a proxy)")
+    if not TOKEN and not FORM_AUTH and not ALLOW_ANON:
+        sys.exit("No credentials configured — set YT2ABS_WEB_USERNAME and "
+                 "YT2ABS_WEB_PASSWORD, or YT2ABS_WEB_TOKEN, or explicitly set "
+                 "YT2ABS_ALLOW_UNAUTHENTICATED=1 behind an authenticating proxy")
     init_db()
     recover_jobs()
     threading.Thread(target=worker, daemon=True).start()
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     httpd.daemon_threads = True
-    print(f"yt2abs-web listening on http://{HOST}:{PORT}", flush=True)
+    mode = "anonymous" if ALLOW_ANON else ("username/password" if FORM_AUTH else "token")
+    print(f"yt2abs-web listening on http://{HOST}:{PORT} (auth: {mode})", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

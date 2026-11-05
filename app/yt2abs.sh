@@ -42,6 +42,10 @@
 #   ABS_LIBRARY_ID         ABS library id               (auto-detect "book" library)
 #   YT2ABS_SCAN            1/0: POST a library scan after writing a book (1)
 #
+# A file at ~/.config/yt2abs/env is sourced automatically if it exists (set
+# YT2ABS_ENV_FILE to use another path), which is how a host install supplies
+# the paths above without a wrapper script.
+#
 # Examples:
 #   yt2abs 'https://www.youtube.com/watch?v=VIDEOID'
 #   yt2abs 'https://www.youtube.com/playlist?list=PL...' --title 'Lectures'
@@ -49,6 +53,16 @@
 #   yt2abs 'https://www.youtube.com/playlist?list=PL...' --split --limit 5
 
 set -euo pipefail
+
+# Optional per-user config, so the CLI needs no wrapper script:
+#   ~/.config/yt2abs/env   (override with YT2ABS_ENV_FILE)
+ENV_FILE=${YT2ABS_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/yt2abs/env}
+if [[ -r "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
 
 OUTPUT_DIR=${YT2ABS_OUTPUT_DIR:-/audiobooks}
 VERIFY_DIR=${YT2ABS_VERIFY_DIR:-$OUTPUT_DIR}
@@ -81,7 +95,7 @@ WORK_DIR=
 PLAYLIST_TITLE=
 YTDLP_AUTH=()
 
-usage() { sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'; }
 
 log() {
   [[ -n "$LOG_FILE" ]] || return 0
