@@ -332,6 +332,7 @@ LOGIN_PAGE = """<!doctype html>
   p {{ margin:0 0 18px; color:#9aa3b2; font-size:14px; }}
   input,button {{ width:100%; box-sizing:border-box; font:inherit; border-radius:10px; }}
   input {{ padding:12px; background:#0f1115; border:1px solid #2c3341; color:#e7e9ee; }}
+  input + input {{ margin-top:12px; }}
   button {{ margin-top:12px; padding:12px; border:0; background:#9a5c0c; color:#fff;
             font-weight:650; cursor:pointer; }}
   .err {{ color:#ff8a8a; font-size:14px; margin-top:12px; }}

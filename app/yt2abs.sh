@@ -160,24 +160,45 @@ flock -n 9 || die "another yt2abs job is already running"
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 sanitize() {
-  # Filesystem-safe, length-safe folder/file name from a video title.
+  # Filesystem-safe, SMB/Windows-safe, length-safe folder/file name.
+  #
+  # YouTube titles routinely contain "(Part 1)", "[4K]", "|", "?" and friends.
+  # Parentheses and brackets are not just cosmetic: a bracketed folder name has
+  # already broken a downstream shell glob on this box, and Windows/SMB rejects
+  # < > : " / \ | ? * outright. Strip all of them from the PATH while leaving
+  # the embedded metadata title untouched, so Audiobookshelf still displays the
+  # original video title.
   local s=$1
+  local blacklist='()[]{}<>:"\|?*#;!$%^~`@=+'
+  local i ch
   s=${s//$'\n'/ }
   s=${s//$'\r'/ }
   s=${s//$'\t'/ }
+  s=${s//&/ and }
   s=${s//\//-}
   s=${s//\\/-}
   s=${s//:/ -}
+  for ((i = 0; i < ${#blacklist}; i++)); do
+    ch=${blacklist:i:1}
+    s=${s//"$ch"/ }
+  done
   s=$(printf '%s' "$s" | LC_ALL=C sed 's/[[:cntrl:]]//g')
   s=$(printf '%s' "$s" | sed -E 's/[[:space:]]+/ /g')
-  s=${s#"${s%%[![:space:]]*}"}
-  s=${s%"${s##*[![:space:]]}"}
-  s=${s%"${s##*[!.]}"}
+  # Trim leading/trailing spaces AND dots: a leading dot would hide the folder
+  # from Audiobookshelf's scanner, and a trailing dot breaks Windows/SMB.
+  s=${s#"${s%%[![:space:].]*}"}
+  s=${s%"${s##*[![:space:].]}"}
+  # No dangling separators ("- Foo -" -> "Foo").
+  s=$(printf '%s' "$s" | sed -E 's/^[-_ ]+//; s/[-_ ]+$//')
+  # Windows reserves these device names at any extension.
+  if [[ "${s^^}" =~ ^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$ ]]; then
+    s="_$s"
+  fi
   # 150 bytes is comfortably under the 255-byte filename limit; iconv -c drops
   # a multi-byte character that got cut in half.
   if [[ $(printf '%s' "$s" | wc -c) -gt 150 ]]; then
     s=$(printf '%s' "$s" | cut -b1-150 | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || true)
-    s=${s%"${s##*[![:space:]]}"}
+    s=$(printf '%s' "$s" | sed -E 's/^[-_ ]+//; s/[-_ ]+$//')
   fi
   printf '%s' "$s"
 }

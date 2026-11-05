@@ -60,8 +60,8 @@ volumes:
   yt2abs-data:
 ```
 
-If Audiobookshelf runs in another compose project, attach both services to a
-shared network (or use the host's IP and published port for `ABS_URL`).
+See [Audiobookshelf setup](#audiobookshelf-setup) for the scan trigger and
+library-folder details.
 
 ## Configuration
 
@@ -143,12 +143,50 @@ yt2abs 'https://www.youtube.com/playlist?list=PL...' --split --limit 5
 Useful flags: `--dry-run`, `--no-cover`, `--no-ingest`, `--bitrate 96k`,
 `--cookies cookies.txt`, `--keep-work`.
 
-## Audiobookshelf scan
+## Audiobookshelf setup
 
-`ABS_TOKEN` must belong to an **admin or root** user. A normal library-scoped
-user gets HTTP 403 from the scan endpoint; yt2abs logs that distinctly rather
-than pretending it worked. When `ABS_LIBRARY_ID` is unset, the first library
-with `mediaType == "book"` is used.
+Three things need to line up:
+
+1. **The same folder.** Mount the directory that is one of your Audiobookshelf
+   *library folders* at `/audiobooks`. yt2abs writes `<Title>/<Title>.m4b`
+   into it. The path string inside each container does not have to match — only
+   the underlying host directory. In compose:
+
+   ```yaml
+   # yt2abs
+   volumes:
+     - /srv/media/audiobooks:/audiobooks
+   # Audiobookshelf
+   volumes:
+     - /srv/media/audiobooks:/audiobooks
+   ```
+
+2. **Make ABS notice new books.** Either enable **Watch Library Folders** in
+   the library settings, or (more reliable) let yt2abs trigger a scan. Set:
+
+   ```yaml
+   ABS_URL: http://audiobookshelf:80
+   ABS_TOKEN: your-admin-api-token
+   # ABS_LIBRARY_ID: optional, pins the library
+   ```
+
+   The folder watcher alone is not dependable for newly created top-level
+   folders, so the scan trigger is what makes a book appear immediately.
+
+3. **Use an admin/root API token.** The scan endpoint rejects normal
+   library-scoped users with HTTP 403. yt2abs logs `ABS rejected the scan (HTTP
+   403)` rather than pretending it worked. When `ABS_LIBRARY_ID` is unset, the
+   first library with `mediaType == "book"` is used — set it explicitly if you
+   have more than one book library.
+
+No other Audiobookshelf setting is required. The `.m4b` already carries title,
+author, year, genre, cover, chapters and the source URL in its description;
+ABS reads those on scan. If it derives an odd title from the file, use ABS's
+**Match** action — YouTube material often has no Audible/Audnexus match, and
+the embedded metadata is usually the better result.
+
+If Audiobookshelf runs in another compose project, attach both services to a
+shared network (or point `ABS_URL` at the host and its published port).
 
 ## How it works
 
@@ -158,6 +196,12 @@ with `mediaType == "book"` is used.
 3. `ffmpeg` muxes to `.m4b` with cover art and chapters, then writes the book
    folder atomically (`.part` until complete).
 4. It either runs your ingest hook or asks ABS to scan.
+
+Folder and file names are sanitized for SMB/Windows and shell-glob safety:
+parentheses, brackets and metacharacters (`| ? * : " < >` …) are removed, `&`
+becomes `and`, leading/trailing dots are stripped, and Windows device names are
+prefixed. The **embedded title keeps the original video title**, so
+Audiobookshelf still displays it as-is.
 
 ## Troubleshooting
 
