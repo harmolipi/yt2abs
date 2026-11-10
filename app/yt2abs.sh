@@ -13,6 +13,7 @@
 # Options:
 #   --title T        override the title
 #   --author A       override the author/artist (default: channel name)
+#   --tags T         comma-separated Audiobookshelf tags for this book
 #   --merge          playlist -> one book with chapters (default for playlists)
 #   --split          playlist -> one book per video
 #   --limit N        process at most N playlist/search entries
@@ -40,7 +41,12 @@
 #   ABS_URL                Audiobookshelf base URL      (unset)
 #   ABS_TOKEN              ABS API token (admin)        (unset)
 #   ABS_LIBRARY_ID         ABS library id               (auto-detect "book" library)
-#   YT2ABS_SCAN            1/0: POST a library scan after writing a book (1)
+#   YT2ABS_TAGS            default tags (comma-separated)      (unset)
+#   YT2ABS_SCAN            auto | always | never               (auto)
+#                          auto = scan when the ABS folder watcher is off,
+#                          otherwise wait for the watcher and scan only if it
+#                          does not add the book within YT2ABS_WATCHER_WAIT.
+#   YT2ABS_WATCHER_WAIT    seconds to wait for the watcher      (90)
 #
 # A file at ~/.config/yt2abs/env is sourced automatically if it exists (set
 # YT2ABS_ENV_FILE to use another path), which is how a host install supplies
@@ -80,7 +86,15 @@ COOKIES_FILE=${YT2ABS_COOKIES:-}
 ABS_URL=${YT2ABS_ABS_URL:-${ABS_URL:-}}
 ABS_TOKEN=${YT2ABS_ABS_TOKEN:-${ABS_TOKEN:-}}
 ABS_LIBRARY_ID=${YT2ABS_ABS_LIBRARY_ID:-${ABS_LIBRARY_ID:-}}
-SCAN=${YT2ABS_SCAN:-1}
+SCAN_MODE=${YT2ABS_SCAN:-auto}
+WATCHER_WAIT=${YT2ABS_WATCHER_WAIT:-90}
+TAGS=${YT2ABS_TAGS:-}
+
+case "${SCAN_MODE,,}" in
+  0|no|off|never|false) SCAN_MODE=never ;;
+  1|yes|on|always|true) SCAN_MODE=always ;;
+  *) SCAN_MODE=auto ;;
+esac
 
 COVER=1
 DRY_RUN=0
@@ -95,7 +109,7 @@ WORK_DIR=
 PLAYLIST_TITLE=
 YTDLP_AUTH=()
 
-usage() { sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'; }
 
 log() {
   [[ -n "$LOG_FILE" ]] || return 0
@@ -126,6 +140,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --title)      TITLE_OVERRIDE=${2:?--title needs a value}; shift ;;
     --author)     AUTHOR_OVERRIDE=${2:?--author needs a value}; shift ;;
+    --tags)       TAGS=${2?--tags needs a value}; shift ;;
     --merge)      MODE=merge ;;
     --split)      MODE=split ;;
     --limit)      LIMIT=${2:?--limit needs a value}; shift ;;
@@ -218,6 +233,18 @@ ffmeta_escape() {
 add_meta() {
   [[ -n "${3:-}" ]] || return 0
   printf '%s=%s\n' "$2" "$(ffmeta_escape "$3")" >>"$1"
+}
+
+write_tags() {
+  # $1 = metadata.json path, $2 = comma-separated tags
+  # Audiobookshelf reads `tags` from the absMetadata (metadata.json) sidecar on
+  # scan; it is not a standard m4b tag. Written before the .m4b is renamed into
+  # place so the watcher and a scan both see it.
+  local out=$1 tags=$2
+  [[ -n "$tags" ]] || return 0
+  jq -n --arg t "$tags" \
+    '{tags: ($t | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))}' \
+    >"$out" || die "could not write tags to $out"
 }
 
 add_chapter() {
@@ -333,20 +360,27 @@ add_source_chapters() {
 
 # ── post-publish: ingest hook or ABS scan ────────────────────────────────────
 
-abs_scan() {
-  [[ -n "$ABS_URL" && -n "$ABS_TOKEN" ]] || return 0
-  command -v curl >/dev/null || { say "WARN: curl not found; cannot trigger an ABS scan"; return 0; }
-  local lib=$ABS_LIBRARY_ID code
+abs_library_id() {
+  local lib=$ABS_LIBRARY_ID
   if [[ -z "$lib" ]]; then
-    command -v jq >/dev/null || { say "WARN: jq not found; set ABS_LIBRARY_ID to trigger scans"; return 0; }
     lib=$(curl -s --max-time 15 -H "Authorization: Bearer $ABS_TOKEN" \
       "$ABS_URL/api/libraries" 2>/dev/null \
       | jq -r '[.libraries[]? | select(.mediaType == "book") | .id][0] // empty' 2>/dev/null)
   fi
-  if [[ -z "$lib" ]]; then
-    say "WARN: could not determine the ABS library id — set ABS_LIBRARY_ID"
-    return 0
-  fi
+  [[ -n "$lib" ]] && printf '%s' "$lib"
+}
+
+abs_item_exists() {
+  # $1 = library id, $2 = book folder name (relPath for a top-level folder)
+  local found
+  found=$(curl -s --max-time 15 -H "Authorization: Bearer $ABS_TOKEN" \
+    "$ABS_URL/api/libraries/$1/items?limit=50&sort=addedAt&desc=1" 2>/dev/null \
+    | jq -r --arg n "$2" '.results[]? | select(.relPath == $n) | .id' 2>/dev/null | head -1)
+  [[ -n "$found" ]]
+}
+
+abs_trigger_scan() {
+  local lib=$1 code
   code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -X POST \
     -H "Authorization: Bearer $ABS_TOKEN" "$ABS_URL/api/libraries/$lib/scan" 2>/dev/null)
   case "$code" in
@@ -354,6 +388,68 @@ abs_scan() {
     401|403) say "WARN: ABS rejected the scan (HTTP $code) — the token needs admin/root" ;;
     *)   say "WARN: ABS scan returned HTTP ${code:-none}" ;;
   esac
+}
+
+abs_scan() {
+  # $1 = book folder name
+  #
+  # auto mode exists because the ABS folder watcher and an API-triggered full
+  # scan race each other: the watcher can add the item mid-scan and the scan
+  # then adds a second copy (seen 2026-11-05). So when the watcher is on, let
+  # it do its job first; only fall back to a scan if the book does not appear.
+  local name=$1 lib watcher waited=0
+  [[ -n "$ABS_URL" && -n "$ABS_TOKEN" ]] || return 0
+  command -v curl >/dev/null || { say "WARN: curl not found; cannot talk to ABS"; return 0; }
+  command -v jq >/dev/null || { say "WARN: jq not found; cannot talk to ABS"; return 0; }
+
+  lib=$(abs_library_id)
+  if [[ -z "$lib" ]]; then
+    say "WARN: could not determine the ABS library id — set ABS_LIBRARY_ID"
+    return 0
+  fi
+
+  case "$SCAN_MODE" in
+    never)  say "→ ABS scan disabled (YT2ABS_SCAN=never)"; return 0 ;;
+    always) abs_trigger_scan "$lib"; return 0 ;;
+  esac
+
+  local lib_json
+  lib_json=$(curl -s --max-time 10 -H "Authorization: Bearer $ABS_TOKEN" \
+    "$ABS_URL/api/libraries/$lib" 2>/dev/null)
+  if [[ -z "$lib_json" ]]; then
+    say "WARN: could not read ABS library settings; not triggering a scan"
+    return 0
+  fi
+  # NOTE: do NOT write `// true` here. jq's `//` treats *false* as absent, so
+  # `disableWatcher: false` would evaluate to true and scan while the watcher
+  # is on — recreating the duplicate race. Ask for the raw value.
+  watcher=$(jq -r '.settings.disableWatcher' <<<"$lib_json" 2>/dev/null)
+
+  case "$watcher" in
+    false) ;;  # watcher is on: give it a chance below
+    *)      # true, null, or unreadable: scanning is the safe default
+      say "→ ABS folder watcher is off; triggering a scan"
+      abs_trigger_scan "$lib"
+      return 0
+      ;;
+  esac
+
+  if [[ "$WATCHER_WAIT" -le 0 ]]; then
+    say "→ ABS folder watcher is on; leaving it to add '$name'"
+    return 0
+  fi
+
+  while [[ "$waited" -lt "$WATCHER_WAIT" ]]; do
+    sleep 5
+    waited=$((waited + 5))
+    if abs_item_exists "$lib" "$name"; then
+      say "✓ ABS folder watcher added '$name' (${waited}s)"
+      return 0
+    fi
+  done
+
+  say "→ watcher did not add '$name' in ${WATCHER_WAIT}s; triggering a scan"
+  abs_trigger_scan "$lib"
 }
 
 post_publish() {
@@ -374,7 +470,7 @@ post_publish() {
     fi
     return 0
   fi
-  [[ "$SCAN" == "1" ]] && abs_scan
+  abs_scan "$name"
   return 0
 }
 
@@ -405,6 +501,10 @@ publish() {
   # half-written audiobook.
   cp -p -- "$outfile" "$target/$name.m4b.part"
   chmod 644 -- "$target/$name.m4b.part"
+  # Tags go in before the audio file becomes visible, so whichever trigger
+  # sees the book (watcher or scan) also sees the tags.
+  write_tags "$target/metadata.json" "$TAGS"
+  chmod 644 -- "$target/metadata.json" 2>/dev/null || true
   mv -f -- "$target/$name.m4b.part" "$target/$name.m4b"
   say "✓ wrote: $target/$name.m4b"
   post_publish "$name"

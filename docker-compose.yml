@@ -12,6 +12,9 @@ services:
       YT2ABS_WEB_PASSWORD: ${YT2ABS_WEB_PASSWORD:?set YT2ABS_WEB_PASSWORD in .env}
       # Optional: bearer token for API/automation.
       YT2ABS_WEB_TOKEN: ${YT2ABS_WEB_TOKEN:-}
+      # Default tags (comma-separated) and scan mode: auto | always | never.
+      YT2ABS_TAGS: ${YT2ABS_TAGS:-}
+      YT2ABS_SCAN: ${YT2ABS_SCAN:-auto}
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
 

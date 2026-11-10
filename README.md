@@ -83,11 +83,27 @@ library-folder details.
 | `ABS_URL` | — | Audiobookshelf base URL, e.g. `http://audiobookshelf:80` |
 | `ABS_TOKEN` | — | ABS API token. **Must be admin or root** for scans |
 | `ABS_LIBRARY_ID` | auto | Pins the library instead of finding the first "book" library |
-| `YT2ABS_SCAN` | `1` | `0` disables the ABS scan trigger |
+| `YT2ABS_TAGS` | — | Default tags (comma-separated); also prefills the web form |
+| `YT2ABS_SCAN` | `auto` | `auto`, `always` or `never` — see [Audiobookshelf setup](#audiobookshelf-setup) |
+| `YT2ABS_WATCHER_WAIT` | `90` | Seconds to wait for the ABS folder watcher before falling back to a scan |
 | `PUID` / `PGID` | `1000` / `1000` | Container drops to these ids |
 | `TZ` | container default | Timestamps in logs |
 
 State lives in `/var/lib/yt2abs` (queue database and per-job logs).
+
+## Tags
+
+Every job can carry comma-separated Audiobookshelf tags. The web form has a
+**Tags** field, prefilled from `YT2ABS_TAGS`; clear it for a one-off book
+without tags. From the CLI:
+
+```bash
+yt2abs 'https://youtu.be/ID' --tags "sermons,orthodox"
+```
+
+Tags are written into the book's `metadata.json` sidecar, which ABS imports on
+scan, so they appear under ABS's tag filter. Embedded m4b metadata has no
+standard tag field — the sidecar is the reliable mechanism.
 
 ## Authentication
 
@@ -140,8 +156,8 @@ yt2abs 'https://youtu.be/ID' --author 'Someone Else'
 yt2abs 'https://www.youtube.com/playlist?list=PL...' --split --limit 5
 ```
 
-Useful flags: `--dry-run`, `--no-cover`, `--no-ingest`, `--bitrate 96k`,
-`--cookies cookies.txt`, `--keep-work`.
+Useful flags: `--tags "a,b"`, `--dry-run`, `--no-cover`, `--no-ingest`,
+`--bitrate 96k`, `--cookies cookies.txt`, `--keep-work`.
 
 ## Audiobookshelf setup
 
@@ -161,22 +177,25 @@ Three things need to line up:
      - /srv/media/audiobooks:/audiobooks
    ```
 
-2. **Make ABS notice new books.** Let yt2abs trigger a scan (recommended) and
-   keep **Watch Library Folders OFF**. Running both races ABS against itself:
-   the watcher can add the item mid-scan and the scan then adds a second copy.
-   That produced a duplicate library entry for one file in testing
-   (2026-11-05). Set:
+2. **Make ABS notice new books.** yt2abs adapts to your library setting:
 
    ```yaml
    ABS_URL: http://audiobookshelf:80
    ABS_TOKEN: your-admin-api-token
    # ABS_LIBRARY_ID: optional, pins the library
+   # YT2ABS_SCAN: auto, always or never
    ```
 
-   Add a **scheduled scan** as a safety net for files added outside yt2abs
-   (library settings → Scan Library, e.g. `0 2 * * *`). The watcher alone is
-   not dependable for newly created top-level folders; the scan trigger is
-   what makes a book appear immediately.
+   - `auto` (default) — **Watch Library Folders ON**: yt2abs waits up to
+     `YT2ABS_WATCHER_WAIT` seconds (90) for the watcher to add the book, then
+     triggers a scan only if it did not. **Watcher OFF**: it scans immediately.
+   - `always` — always trigger a scan. Use this only with the watcher off.
+   - `never` — never trigger a scan.
+
+   Do **not** force a scan while the watcher is on: the two can race and ABS
+   may add the same folder twice (observed 2026-11-05). `auto` exists to avoid
+   exactly that. Add a **scheduled scan** as a safety net (library settings →
+   Scan Library, e.g. `0 2 * * *`).
 
 3. **Use an admin/root API token.** The scan endpoint rejects normal
    library-scoped users with HTTP 403. yt2abs logs `ABS rejected the scan (HTTP

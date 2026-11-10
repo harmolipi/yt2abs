@@ -42,6 +42,7 @@ Environment:
   YT2ABS_TIMEOUT               per-job seconds, default 21600 (6 h)
 """
 
+import html
 import json
 import os
 import secrets
@@ -69,6 +70,7 @@ DB_PATH = os.environ.get("YT2ABS_DB", "/var/lib/yt2abs/queue.db")
 LOG_DIR = os.environ.get("YT2ABS_JOB_LOG_DIR", "/var/lib/yt2abs/logs")
 BIN = os.environ.get("YT2ABS_BIN", "/usr/local/bin/yt2abs")
 TIMEOUT = int(os.environ.get("YT2ABS_TIMEOUT", "21600"))
+DEFAULT_TAGS = os.environ.get("YT2ABS_TAGS", "").strip()
 COOKIE = "yt2abs_session"
 MAX_LOG_BYTES = 256 * 1024
 KEEP_JOBS = 200
@@ -180,6 +182,7 @@ def init_db():
                    url         TEXT NOT NULL,
                    title       TEXT,
                    book        TEXT,
+                   tags        TEXT,
                    mode        TEXT NOT NULL,
                    status      TEXT NOT NULL,
                    created_at  REAL NOT NULL,
@@ -193,6 +196,8 @@ def init_db():
         cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
         if "book" not in cols:
             conn.execute("ALTER TABLE jobs ADD COLUMN book TEXT")
+        if "tags" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN tags TEXT")
 
 
 def recover_jobs():
@@ -272,6 +277,9 @@ def run_job(jid):
     cmd = [BIN, row["url"]]
     if row["title"]:
         cmd += ["--title", row["title"]]
+    # Always pass --tags (even empty) so clearing the field overrides
+    # YT2ABS_TAGS instead of silently falling back to the default.
+    cmd += ["--tags", row["tags"] or ""]
     if row["mode"] in ("merge", "split"):
         cmd += [f"--{row['mode']}"]
 
@@ -437,6 +445,12 @@ PAGE = """<!doctype html>
           </select>
         </div>
       </div>
+      <div>
+        <label for="tags">Tags (optional)</label>
+        <input id="tags" name="tags" maxlength="300"
+               value="<!--DEFAULT_TAGS-->"
+               placeholder="comma-separated, e.g. sermons, orthodox">
+      </div>
     </div>
     <button id="submit" type="submit">Add audiobook</button>
     <p id="msg" role="status"></p>
@@ -533,6 +547,7 @@ form.addEventListener("submit", async (ev) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: $("url").value.trim(),
                              title: $("title").value.trim(),
+                             tags: $("tags").value.trim(),
                              mode: $("mode").value })
     });
     const data = await r.json().catch(() => ({}));
@@ -671,8 +686,10 @@ class Handler(BaseHTTPRequestHandler):
                            "img-src 'self' data:; form-action 'self'; base-uri 'none'"}
             logout = ('<a class="logout" href="/logout">Log out</a>'
                       if (FORM_AUTH or TOKEN) and not ALLOW_ANON else "")
-            return self.send(200, PAGE.replace("<!--LOGOUT-->", logout),
-                             "text/html; charset=utf-8", headers)
+            page = (PAGE.replace("<!--LOGOUT-->", logout)
+                        .replace("<!--DEFAULT_TAGS-->",
+                                 html.escape(DEFAULT_TAGS, quote=True)))
+            return self.send(200, page, "text/html; charset=utf-8", headers)
 
         if path == "/api/jobs":
             return self.json(200, {"jobs": list_jobs()})
@@ -740,6 +757,7 @@ class Handler(BaseHTTPRequestHandler):
 
         url = str(data.get("url", "")).strip()
         title = str(data.get("title", "")).strip()[:200]
+        tags = str(data.get("tags", "")).strip()[:300]
         mode = str(data.get("mode", "auto")).strip().lower()
 
         if not (1 <= len(url) <= 2048):
@@ -753,9 +771,9 @@ class Handler(BaseHTTPRequestHandler):
         jid = uuid.uuid4().hex[:12]
         with DB_LOCK, db() as conn:
             conn.execute(
-                "INSERT INTO jobs (id,url,title,mode,status,created_at) "
-                "VALUES (?,?,?,?, 'queued', ?)",
-                (jid, url, title, mode, time.time()),
+                "INSERT INTO jobs (id,url,title,tags,mode,status,created_at) "
+                "VALUES (?,?,?,?,?, 'queued', ?)",
+                (jid, url, title, tags, mode, time.time()),
             )
         JOB_Q.put(jid)
         return self.json(201, {"id": jid})
